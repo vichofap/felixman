@@ -1,7 +1,7 @@
 'use client';
 
 import { FormEvent, useEffect, useMemo, useState } from 'react';
-import { Bike, Boxes, CircleDollarSign, MessageCircle, PackagePlus, Search, ShoppingCart, TriangleAlert } from 'lucide-react';
+import { Bike, Boxes, CircleDollarSign, Headphones, Keyboard, MessageCircle, Mic, PackagePlus, RotateCcw, Search, ShoppingCart, Square, TriangleAlert, Volume2 } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -11,6 +11,24 @@ import { Label } from '@/components/ui/label';
 
 type Product = { id: number; name: string; sku: string; category: string; brand: string; compatibility: string; stock: number; minStock: number; cost: number; price: number };
 type CartLine = Product & { quantity: number };
+type VoiceRecognition = {
+  lang: string;
+  interimResults: boolean;
+  maxAlternatives: number;
+  start: () => void;
+  stop: () => void;
+  onresult: ((event: { results: { 0: { 0: { transcript: string } } }[] }) => void) | null;
+  onerror: ((event: { error: string }) => void) | null;
+  onend: (() => void) | null;
+};
+type VoiceRecognitionConstructor = new () => VoiceRecognition;
+
+declare global {
+  interface Window {
+    SpeechRecognition?: VoiceRecognitionConstructor;
+    webkitSpeechRecognition?: VoiceRecognitionConstructor;
+  }
+}
 
 const seedProducts: Product[] = [
   { id: 1, name: 'Aceite 20W-50 4T', sku: 'ACE-2050', category: 'Aceites', brand: 'Motul', compatibility: 'Motos 4 tiempos', stock: 18, minStock: 6, cost: 24, price: 32 },
@@ -25,9 +43,19 @@ export default function Home() {
   const [cart, setCart] = useState<CartLine[]>([]);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [notice, setNotice] = useState('');
+  const [voiceSupported, setVoiceSupported] = useState(true);
+  const [listening, setListening] = useState(false);
+  const [voiceQuestion, setVoiceQuestion] = useState('');
+  const [voiceAnswer, setVoiceAnswer] = useState('Pulsa el botón Hablar y pregunta por un producto.');
+  const [recognition, setRecognition] = useState<VoiceRecognition | null>(null);
 
   useEffect(() => {
     fetch('/api/products').then((r) => r.ok ? r.json() : Promise.reject()).then((data) => data.length && setProducts(data)).catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    setVoiceSupported(Boolean(window.SpeechRecognition || window.webkitSpeechRecognition));
+    return () => window.speechSynthesis?.cancel();
   }, []);
 
   const filtered = products.filter((product) => `${product.name} ${product.sku} ${product.brand} ${product.compatibility}`.toLowerCase().includes(query.toLowerCase()));
@@ -68,6 +96,81 @@ export default function Home() {
     window.open(`https://wa.me/${storeNumber}?text=${encodeURIComponent(message)}`, '_blank', 'noopener,noreferrer');
   }
 
+  function speak(message: string) {
+    if (!('speechSynthesis' in window)) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(message);
+    utterance.lang = 'es-PE';
+    utterance.rate = 0.92;
+    utterance.pitch = 1;
+    window.speechSynthesis.speak(utterance);
+  }
+
+  function answerQuestion(question: string) {
+    const cleanQuestion = normalizeText(question);
+    let answer = '';
+
+    if (!cleanQuestion) {
+      answer = 'No escuché una pregunta. Inténtalo nuevamente.';
+    } else if (/agot|reponer|poco stock|stock bajo/.test(cleanQuestion)) {
+      answer = lowStock.length
+        ? `Hay ${lowStock.length} productos por reponer: ${lowStock.map((product) => `${product.name}, quedan ${product.stock}`).join('; ')}.`
+        : 'No hay productos por reponer. Todo el inventario está abastecido.';
+    } else {
+      const product = findBestProduct(cleanQuestion, products);
+      if (!product) {
+        answer = `No encontré un producto que coincida con ${question}. Prueba diciendo el nombre, la marca o el código.`;
+      } else if (/compat|sirve|funciona|modelo|moto/.test(cleanQuestion)) {
+        answer = `${product.name}, marca ${product.brand}, es compatible con ${product.compatibility}. Quedan ${product.stock} unidades y cuesta ${formatSoles(product.price)}.`;
+      } else if (/precio|cuesta|vale|cuanto esta|costo/.test(cleanQuestion)) {
+        answer = `${product.name} cuesta ${formatSoles(product.price)}. Quedan ${product.stock} unidades.`;
+      } else if (/stock|queda|hay|cantidad|existencia/.test(cleanQuestion)) {
+        answer = `Quedan ${product.stock} unidades de ${product.name}. Su precio es ${formatSoles(product.price)}.`;
+      } else {
+        answer = `${product.name}, marca ${product.brand}. Cuesta ${formatSoles(product.price)}, quedan ${product.stock} unidades y es compatible con ${product.compatibility}.`;
+      }
+    }
+
+    setVoiceQuestion(question);
+    setVoiceAnswer(answer);
+    speak(answer);
+  }
+
+  function startListening() {
+    if (listening && recognition) {
+      recognition.stop();
+      return;
+    }
+    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!Recognition) {
+      setVoiceSupported(false);
+      const message = 'Este navegador no permite escuchar la voz. Puedes escribir la pregunta en el campo de texto.';
+      setVoiceAnswer(message);
+      speak(message);
+      return;
+    }
+
+    window.speechSynthesis?.cancel();
+    const listener = new Recognition();
+    listener.lang = 'es-PE';
+    listener.interimResults = false;
+    listener.maxAlternatives = 1;
+    listener.onresult = (event) => answerQuestion(event.results[0][0].transcript);
+    listener.onerror = (event) => {
+      const message = event.error === 'not-allowed'
+        ? 'No pude usar el micrófono. Permite el acceso al micrófono o escribe la pregunta.'
+        : 'No logré entenderte. Pulsa Hablar e inténtalo otra vez.';
+      setVoiceAnswer(message);
+      speak(message);
+      setListening(false);
+    };
+    listener.onend = () => setListening(false);
+    setRecognition(listener);
+    setListening(true);
+    setVoiceAnswer('Te escucho. Haz tu pregunta ahora.');
+    listener.start();
+  }
+
   useEffect(() => {
     const modelContext = (document as Document & { modelContext?: { registerTool: (tool: object, options?: { signal?: AbortSignal }) => void | Promise<void> } }).modelContext;
     if (!modelContext?.registerTool) return;
@@ -99,11 +202,53 @@ export default function Home() {
       </header>
 
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 sm:py-8">
-        <Tabs defaultValue="inventory">
+        <Tabs defaultValue="voice">
           <TabsList className="mb-6 h-auto w-full justify-start overflow-x-auto rounded-xl bg-muted p-1 sm:w-auto">
+            <TabsTrigger value="voice"><Mic /> Consulta por voz</TabsTrigger>
             <TabsTrigger value="inventory"><Boxes /> Inventario</TabsTrigger>
             <TabsTrigger value="catalog"><ShoppingCart /> Catálogo y pedido</TabsTrigger>
           </TabsList>
+
+          <TabsContent value="voice">
+            <section className="mx-auto max-w-4xl overflow-hidden rounded-3xl border-2 border-slate-700 bg-[#111820] text-white shadow-2xl">
+              <div className="border-b border-white/10 px-5 py-5 sm:px-8">
+                <div className="flex items-center gap-3">
+                  <span className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-primary text-[#111820]"><Headphones size={28} aria-hidden="true" /></span>
+                  <div><h1 className="font-heading text-2xl font-black sm:text-3xl">Asistente de inventario</h1><p className="mt-1 text-base text-slate-300">Consulta precios, existencias y compatibilidad.</p></div>
+                </div>
+              </div>
+
+              <div className="grid gap-6 p-5 sm:p-8 lg:grid-cols-[280px_1fr]">
+                <div className="flex flex-col items-center justify-center rounded-2xl bg-white/5 p-5 text-center">
+                  <Button
+                    type="button"
+                    onClick={startListening}
+                    aria-label={listening ? 'Detener escucha' : 'Hablar con el asistente'}
+                    aria-pressed={listening}
+                    className={`h-44 w-44 rounded-full border-8 text-xl font-black shadow-[0_0_0_8px_rgb(255_255_255/8%)] transition-transform focus-visible:ring-4 focus-visible:ring-white ${listening ? 'animate-pulse border-red-300 bg-red-500 text-white hover:bg-red-600' : 'border-orange-200 bg-primary text-[#111820] hover:scale-105 hover:bg-primary'}`}
+                  >
+                    <span className="flex flex-col items-center gap-2">{listening ? <Square size={45} fill="currentColor" /> : <Mic size={52} />}<span>{listening ? 'Detener' : 'Hablar'}</span></span>
+                  </Button>
+                  <p className="mt-5 text-base font-semibold" aria-live="polite">{listening ? 'Escuchando…' : voiceSupported ? 'Pulsa una vez y pregunta' : 'Usa la consulta escrita'}</p>
+                </div>
+
+                <div className="flex min-h-80 flex-col">
+                  <div className="flex-1 rounded-2xl border border-white/15 bg-black/20 p-5 sm:p-6">
+                    <p className="mb-3 text-sm font-bold uppercase tracking-widest text-orange-300">Respuesta</p>
+                    <output aria-live="assertive" aria-atomic="true" className="block text-xl font-semibold leading-relaxed sm:text-2xl">{voiceAnswer}</output>
+                    {voiceQuestion && <p className="mt-5 border-t border-white/10 pt-4 text-base text-slate-300"><span className="font-bold text-white">Pregunta:</span> {voiceQuestion}</p>}
+                  </div>
+                  <Button type="button" onClick={() => speak(voiceAnswer)} variant="outline" className="mt-4 h-14 border-white/30 bg-transparent text-base font-bold text-white hover:bg-white/10 hover:text-white"><Volume2 size={22} /> Repetir respuesta</Button>
+                </div>
+              </div>
+
+              <form onSubmit={(event) => { event.preventDefault(); const form = new FormData(event.currentTarget); answerQuestion(String(form.get('voiceText') ?? '')); }} className="border-t border-white/10 bg-white/5 p-5 sm:p-8">
+                <Label htmlFor="voiceText" className="mb-3 flex items-center gap-2 text-base font-bold text-white"><Keyboard size={21} /> También puedes escribir la pregunta</Label>
+                <div className="flex flex-col gap-3 sm:flex-row"><Input id="voiceText" name="voiceText" placeholder="Ejemplo: ¿Cuánto cuesta el aceite Motul?" className="h-14 flex-1 border-white/20 bg-white text-base text-slate-950 placeholder:text-slate-500" /><Button type="submit" className="h-14 px-7 text-base font-black">Consultar</Button></div>
+                <div className="mt-5 grid gap-2 text-base text-slate-300 sm:grid-cols-3"><p>“¿Cuánto cuesta el aceite?”</p><p>“¿Cuántas cadenas quedan?”</p><p>“¿Qué productos debo reponer?”</p></div>
+              </form>
+            </section>
+          </TabsContent>
 
           <TabsContent value="inventory">
             <section className="mb-6 grid gap-4 sm:grid-cols-3">
@@ -167,4 +312,28 @@ function SearchBox({ value, onChange }: { value: string; onChange: (value: strin
 
 function Field({ label, name, ...props }: React.ComponentProps<typeof Input> & { label: string; name: string }) {
   return <div className="grid gap-2"><Label htmlFor={name}>{label}</Label><Input id={name} name={name} {...props} /></div>;
+}
+
+function normalizeText(value: string) {
+  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function findBestProduct(question: string, products: Product[]) {
+  const ignored = new Set(['cuanto', 'cuesta', 'precio', 'vale', 'queda', 'quedan', 'stock', 'hay', 'del', 'de', 'la', 'el', 'los', 'las', 'un', 'una', 'para', 'producto', 'repuesto', 'moto', 'bicicleta']);
+  const terms = question.split(' ').filter((term) => term.length > 1 && !ignored.has(term));
+  if (!terms.length) return null;
+
+  const ranked = products.map((product) => {
+    const name = normalizeText(product.name);
+    const searchable = normalizeText(`${product.name} ${product.sku} ${product.brand} ${product.category} ${product.compatibility}`);
+    const score = terms.reduce((total, term) => total + (name.includes(term) ? 3 : searchable.includes(term) ? 1 : 0), 0);
+    return { product, score };
+  }).sort((a, b) => b.score - a.score);
+
+  return ranked[0]?.score > 0 ? ranked[0].product : null;
+}
+
+function formatSoles(value: number) {
+  const whole = Number.isInteger(value) ? value.toFixed(0) : value.toFixed(2);
+  return `${whole} soles`;
 }

@@ -10,6 +10,8 @@ Sistema web de inventario y catálogo para una tienda de repuestos, aceites de m
 - Catálogo adaptable a celular.
 - Carrito que prepara el pedido y lo abre en WhatsApp.
 - Base de datos D1 para conservar los productos.
+- Asistente accesible para consultar por voz precios, stock y compatibilidad.
+- Respuesta hablada, repetición y alternativa de consulta escrita.
 
 ## Configuración
 
